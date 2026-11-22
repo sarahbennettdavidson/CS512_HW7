@@ -103,9 +103,9 @@ uniform float u_fresScale;
 uniform float u_fresBias;
 uniform vec3 u_colorCenter;
 uniform vec3 u_colorRim;
-uniform vec3 u_randLightPos;   // second light's position, picked at random on page load
-uniform vec3 u_cubeColor;      // mirror cube color, picked at random on page load
-uniform float u_bubbleTime;    // the bubbles' own clock: runs faster or slower with the Bubble Speed slider
+uniform vec3 u_randLightPos;   // random second light position
+uniform vec3 u_cubeColor;      // random cube color
+uniform float u_bubbleTime;    // bubble clock, set by bubble speed slider
 
 out vec4 fragColor;
 
@@ -144,32 +144,32 @@ struct HitData {
 };
 
 const Sphere lightSphere = Sphere(vec3(4.0, 3.0, -4.0), 0.3, vec3(1.0, 1.0, 0.9));
-Sphere randLightSphere;   // second light, set in initScene from u_randLightPos
+Sphere randLightSphere;   // second light
 Sphere glassSphere;
 Cube cube;
 
-// ---- Particle system: stateless bubbles (slides 14-1 #21-23) ----
+// particle system bubbles 14-1 #21-23
 const int N_BUBBLES = 12;
 Sphere bubbles[N_BUBBLES];
 
-float hash(float n) { return fract(sin(n) * 43758.5453); }   // repeatable random number per id
+float hash(float n) { return fract(sin(n) * 43758.5453); }   // random number from id
 
-// Each bubble is a function of its id and the time: no stored state, no update loop
+// bubble from id and time, no stored state
 Sphere bubbleAt(float id, float time) {
     float lifespan = 7.0;
-    float clock = time + hash(id) * lifespan;           // random head start (slide 22)
-    float age   = mod(clock, lifespan);                 // wraps back to 0: the bubble is reborn
-    float life  = age / lifespan;                       // 0 = just born, 1 = about to pop
+    float clock = time + hash(id) * lifespan;           // random head start 14-1 #22
+    float age   = mod(clock, lifespan);                 // wraps to 0, bubble is reborn
+    float life  = age / lifespan;                       // 0 born, 1 pops
     float seed  = id + floor(clock / lifespan) * 17.0;  // new random numbers each life
 
     float radius  = 0.5;
     vec3 spawn    = vec3(6.0 * (hash(seed + 1.0) - 0.5),
-                         FLOOR_Y - radius - 0.2 - hash(seed + 4.0),   // born under the floor, out of view
+                         FLOOR_Y - radius - 0.2 - hash(seed + 4.0),   // born under the floor
                          -4.0);
     vec3 velocity = vec3(0.0, 0.8 + 0.4 * hash(seed + 2.0), 0.0);    // straight up
     float phase   = 6.283 * hash(seed + 3.0);
-    vec3 swirl    = 0.6 * life * vec3(sin(age * 1.5 + phase), 0.0, cos(age * 1.3 + phase));  // slide 23, no wind
-    vec3 bob      = vec3(0.0, 0.15 * sin(time * 0.9 + phase), 0.0);  // the floating motion
+    vec3 swirl    = 0.6 * life * vec3(sin(age * 1.5 + phase), 0.0, cos(age * 1.3 + phase));  // swirl 14-1 #23, no wind
+    vec3 bob      = vec3(0.0, 0.15 * sin(time * 0.9 + phase), 0.0);  // floating bob
 
     return Sphere(spawn + velocity * age + swirl + bob, radius, vec3(1.0));
 }
@@ -179,7 +179,7 @@ void initScene(float time) {
     float b = time * 0.3;
     for (int i = 0; i < N_BUBBLES; i++) bubbles[i] = bubbleAt(float(i), u_bubbleTime);
 
-    cube = Cube(vec3(sin(b) * 2.0, cos(b * 1.5) + 0.5, -9.0 + cos(b * 0.7)), 0.8, u_cubeColor, 0.85);   // random-color mirror cube
+    cube = Cube(vec3(sin(b) * 2.0, cos(b * 1.5) + 0.5, -9.0 + cos(b * 0.7)), 0.8, u_cubeColor, 0.85);   // mirror cube
 }
 
 bool intersectSphere(Ray ray, Sphere s, out float t) {
@@ -215,7 +215,8 @@ bool intersectCube(Ray ray, out float t, out vec3 normal) {
 }
 
 //eta = n1 / n2
-// Snell's law. Returns vec3(0) on total internal reflection.
+// snell's law 12-1 #15 #16
+// returns 0 on total internal reflection 12-1 #17
 vec3 refraction(vec3 I, vec3 N, float eta) {
     float cosI = -dot(I, N);
     float k = 1.0 - eta * eta * (1.0 - cosI * cosI);
@@ -223,7 +224,8 @@ vec3 refraction(vec3 I, vec3 N, float eta) {
     return eta * I + (eta * cosI - sqrt(k)) * N;
 }
 
-// vvvv-style Fresnel: bias + scale * (1 - N.V)^exponent
+// fresnel like vvvv 12-1 #18
+// bias + scale * (1 - cos)^exponent
 float fresnel(float cosine, float exponent, float scale, float bias) {
     return clamp(bias + scale * pow(1.0 - cosine, exponent), 0.0, 1.0);
 }
@@ -265,7 +267,7 @@ HitData traceScene(Ray ray, bool includeLight) {
         hit = HitData(true, t, ray.origin + ray.direction * t, n, cube.color, cube.reflectivity, false, false);
     }
 
-    // bubbles: skipped for shadow rays (includeLight == false); their ring shadow is handled in trace()
+    // bubbles, skipped for shadow rays
     if (includeLight) {
         for (int i = 0; i < N_BUBBLES; i++) {
             if (intersectSphere(ray, bubbles[i], t) && t < hit.t) {
@@ -282,38 +284,40 @@ vec3 sky(vec3 dir) {
     return mix(vec3(0.09, 0.12, 0.18), vec3(0.18, 0.21, 0.27), 0.5 * (dir.y + 1.0));
 }
 
-// Direct light from ONE light at point p with normal n: shadow ray, bubble ring shadows, diffuse, falloff.
-// Called once per light, and the results are added: that's how multiple lights work.
+// point light, normal n, point p
 vec3 directLight(vec3 p, vec3 n, Sphere light) {
     vec3 toLight = light.center - p;
     float lightDist = length(toLight);
     vec3 lightDir = toLight / lightDist;
 
+    // shadow ray, nudged off the surface 12-1 #10
     Ray shadowRay = Ray(p + n * 0.001, lightDir);
     HitData blocker = traceScene(shadowRay, false);
     float visible = blocker.hit && blocker.t < lightDist ? 0.0 : 1.0;
 
-    // Glass shadow: the shadow ray passes through the glass, losing F at the way in and F at the way out.
-    // F is small through the middle and near 1 at the edge, so the shadow is a dark ring with a lighter center.
-    // Each bubble the shadow ray passes through multiplies in its own share, so overlapping bubble shadows get darker.
+    // bubble ring shadow
+    // light loses F going in and F going out 12-1 #18
+    // small F in the middle, F near 1 at the edge, so a dark ring
+    // overlapping bubbles multiply and get darker
     vec3 glassShadow = vec3(1.0);
     float tg;
     for (int i = 0; i < N_BUBBLES; i++) {
         if (intersectSphere(shadowRay, bubbles[i], tg) && tg < lightDist) {
             vec3 gn = (shadowRay.origin + lightDir * tg - bubbles[i].center) / bubbles[i].radius;
-            float cosG = abs(dot(lightDir, gn));             // same angle going in and coming out
+            float cosG = abs(dot(lightDir, gn));             // same angle in and out
             float Fg = fresnel(cosG, u_fresExp, u_fresScale, u_fresBias);
             vec3 tintG = mix(u_colorCenter, u_colorRim, Fg);
             glassShadow *= tintG * tintG * (1.0 - Fg) * (1.0 - Fg);   // in and out
         }
     }
 
+    // diffuse and distance falloff
     float diff = max(dot(n, lightDir), 0.0);
     float falloff = 1.0 / (1.0 + 0.1 * lightDist * lightDist);
     return LIGHT_POWER * diff * falloff * visible * glassShadow;
 }
 
-// One-level shade for the reflected part of the glass (no further bounces)
+// one level shade for the reflected ray, no more bounces
 vec3 shadeOnce(Ray r) {
     HitData h = traceScene(r, true);
     if (!h.hit || h.isGlass) return sky(r.direction);
@@ -337,43 +341,43 @@ vec3 trace(Ray ray) {
         }
 
         if (hit.isLight) {
-            color += attenuation * hit.color * LIGHT_POWER;   // whichever light was hit
+            color += attenuation * hit.color * LIGHT_POWER;   // either light
             break;
         }
 
         // Refraction: (option 1)either reflects or refracts the ray, whichever Schlick says is stronger
         // (option 2): finalColor = hit.color * (F * reflectionColor + (1.0 - F) * refractionColor)
         // (option 3): Monte Carlo Sampling (multiple rays per pixel), reflect with probability F (random() < schlick_value), else refract, and average many samples per pixel
-        // Using option 2 (blend), with the vvvv Fresnel instead of Schlick
+        // option 2 blend 12-2 #8 #11, vvvv fresnel instead of schlick
         if (hit.isGlass) {
             vec3 n = hit.normal;
             float cosI = dot(-ray.direction, n);
             bool entering = cosI > 0.0;
-            if (!entering) { n = -n; cosI = -cosI; }            // inside the glass: flip normal
+            if (!entering) { n = -n; cosI = -cosI; }            // inside the glass, flip normal 12-1 #16
             float eta = entering ? 1.0 / GLASS_IOR : GLASS_IOR;
 
             vec3 refl = reflect(ray.direction, n);
             vec3 refr = refraction(ray.direction, n, eta);
 
-            if (refr == vec3(0.0)) {                             // total internal reflection: F = 1 (12-1 #20)
-                attenuation *= u_colorRim;                       // tint at F = 1
+            if (refr == vec3(0.0)) {                             // total internal reflection, F = 1 12-1 #17 #20
+                attenuation *= u_colorRim;                       // rim color at F = 1
                 ray = Ray(hit.point + n * 0.001, refl);
                 continue;
             }
 
-            // 12-1 #20: when exiting (ηi > ηt), use cos θt in place of cos θi
-            float cosT = sqrt(1.0 - eta * eta * (1.0 - cosI * cosI));   // cos θt (12-1 #16)
+            // exiting uses cos θt instead of cos θi 12-1 #20
+            float cosT = sqrt(1.0 - eta * eta * (1.0 - cosI * cosI));   // cos θt 12-1 #16
             float F = fresnel(entering ? cosI : cosT, u_fresExp, u_fresScale, u_fresBias);
-            vec3 tint = mix(u_colorCenter, u_colorRim, F);       // lerp between the two colors
+            vec3 tint = mix(u_colorCenter, u_colorRim, F);       // lerp the two colors
 
-            // reflected part added now, refracted part keeps going through the loop
+            // reflected part now, refracted part keeps looping 12-2 #8
             if (entering) color += attenuation * tint * F * shadeOnce(Ray(hit.point + n * 0.001, refl));
             attenuation *= tint * (1.0 - F);
             ray = Ray(hit.point - n * 0.001, refr);
             continue;
         }
 
-        // Multiple lights: add up each light's direct light (each with its own shadow ray)
+        // multiple lights, add each one
         vec3 light = directLight(hit.point, hit.normal, lightSphere)
                    + directLight(hit.point, hit.normal, randLightSphere);
 
@@ -458,7 +462,7 @@ void main() {
   gl.enableVertexAttribArray(0);
 
   const bounces = document.getElementById("bounces");
-  // Ambient fill light: a random strength between 0.05 and 0.25, picked once each time the page loads
+  // random ambient 0.05 to 0.25 on load
   const ambientStrength = 0.05 + Math.random() * 0.20;
   const bubbleSpeed = document.getElementById("bubbleSpeed");
   const fresExp = document.getElementById("fresExp");
@@ -466,24 +470,24 @@ void main() {
   const fresBias = document.getElementById("fresBias");
   const colorCenter = document.getElementById("colorCenter");
   const colorRim = document.getElementById("colorRim");
-  // "#rrggbb" -> linear RGB (the shader gamma-corrects at the end)
+  // hex color to linear rgb, shader gamma corrects at the end
   const hexToLinear = hex => [1, 3, 5].map(i => Math.pow(parseInt(hex.substr(i, 2), 16) / 255, 2.2));
   for (const slider of [bounces, bubbleSpeed, fresExp, fresScale, fresBias]) {
     slider.addEventListener("input", () => document.getElementById(slider.id + "Value").textContent = slider.value);
   }
 
-  // Second light: a random spot above y = 3, picked once each time the page loads
+  // random second light above y 3 on load
   const randLightPos = [Math.random() * 10 - 5, 3.5 + Math.random() * 3, -1 - Math.random() * 8];
 
-  // Mirror cube: a random hue at full saturation and brightness, picked once each time the page loads
+  // random bright cube color on load
   const hue = Math.random() * 6;
   const cubeColor = [5, 3, 1].map(n => { const k = (n + hue) % 6; return 1 - Math.max(0, Math.min(k, 4 - k, 1)); });
 
-  // Bubble clock: advances by (frame time x Bubble Speed), so dragging the slider changes the rate without making bubbles jump
+  // bubble clock, speed slider changes the rate with no jumps
   let bubbleTime = 0, lastTime = 0;
 
   // Dragging orbits the camera
-  let pitch = 0.4, yaw = 0;   // start tilted down a little so the glass's shadow is in view
+  let pitch = 0.4, yaw = 0;   // tilted down so bubble shadows are in view
   canvas.addEventListener("pointerdown", e => canvas.setPointerCapture(e.pointerId));
   canvas.addEventListener("pointermove", e => {
     if (!canvas.hasPointerCapture(e.pointerId)) return;
@@ -495,7 +499,7 @@ void main() {
     requestAnimationFrame(render);
     if (!program) return;
 
-    const dt = Math.min((time - lastTime) / 1000, 0.1);   // seconds since last frame (capped, e.g. after switching tabs)
+    const dt = Math.min((time - lastTime) / 1000, 0.1);   // seconds since last frame, capped
     lastTime = time;
     bubbleTime += dt * bubbleSpeed.value;
 
