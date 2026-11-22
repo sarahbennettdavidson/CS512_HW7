@@ -162,7 +162,7 @@ Sphere bubbleAt(float id, float time) {
     float life  = age / lifespan;                       // 0 born, 1 pops
     float seed  = id + floor(clock / lifespan) * 17.0;  // new random numbers each life
 
-    float radius  = 0.5;
+    float radius  = 0.35 + 0.3 * hash(seed + 5.0);   // random size each life
     vec3 spawn    = vec3(6.0 * (hash(seed + 1.0) - 0.5),
                          FLOOR_Y - radius - 0.2 - hash(seed + 4.0),   // born under the floor
                          -4.0);
