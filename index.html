@@ -29,7 +29,7 @@
 
   <p>Edit the shaders on the left; the canvas updates as you type.<br>
     Drag with the mouse to orbit the camera around the scene.<br>
-    Use the sliders to change the max number of bounces and the ambient light strength.</p>
+    Use the sliders to change the max number of bounces and the bubbles' Fresnel and colors.</p>
 
   <div class="layout">
     <div class="editors">
@@ -50,13 +50,29 @@
       <div class="controls">
         <div class="control-row">
           <label for="bounces">Max Bounces:</label>
-          <input type="range" id="bounces" min="1" max="8" value="4">
-          <span id="bouncesValue">4</span>
+          <input type="range" id="bounces" min="1" max="8" value="6">
+          <span id="bouncesValue">6</span>
         </div>
         <div class="control-row">
-          <label for="ambient">Ambient Strength:</label>
-          <input type="range" id="ambient" min="0" max="1" step="0.05" value="0.05">
-          <span id="ambientValue">0.5</span>
+          <label for="fresExp">Fresnel Exponent:</label>
+          <input type="range" id="fresExp" min="0.1" max="8" step="0.1" value="3">
+          <span id="fresExpValue">3</span>
+        </div>
+        <div class="control-row">
+          <label for="fresScale">Fresnel Scale:</label>
+          <input type="range" id="fresScale" min="0" max="3" step="0.05" value="1">
+          <span id="fresScaleValue">1</span>
+        </div>
+        <div class="control-row">
+          <label for="fresBias">Fresnel Bias:</label>
+          <input type="range" id="fresBias" min="-0.5" max="0.5" step="0.01" value="0">
+          <span id="fresBiasValue">0</span>
+        </div>
+        <div class="control-row">
+          <label for="colorCenter">Center Color:</label>
+          <input type="color" id="colorCenter" value="#bff0ff">
+          <label for="colorRim">Rim Color:</label>
+          <input type="color" id="colorRim" value="#2040ff">
         </div>
       </div>
     </div>
@@ -77,6 +93,12 @@ uniform vec2 u_resolution;
 uniform int u_maxBounces;
 uniform float u_ambientStrength; //Ambient fill light for better visual
 uniform vec2 u_cameraOrbit;
+uniform float u_fresExp;
+uniform float u_fresScale;
+uniform float u_fresBias;
+uniform vec3 u_colorCenter;
+uniform vec3 u_colorRim;
+uniform vec3 u_randLightPos;   // second light's position, picked at random on page load
 
 out vec4 fragColor;
 
@@ -115,15 +137,41 @@ struct HitData {
 };
 
 const Sphere lightSphere = Sphere(vec3(4.0, 3.0, -4.0), 0.3, vec3(1.0, 1.0, 0.9));
-Sphere sphere;
+Sphere randLightSphere;   // second light, set in initScene from u_randLightPos
 Sphere glassSphere;
 Cube cube;
 
-void initScene(float time) {
-    float a = time * 0.5;
-    sphere = Sphere(vec3(cos(a) * 2.5, sin(a * 1.3) * 0.8, -6.0 + sin(a) * 0.5), 1.0, vec3(1.0, 0.3, 0.3));
+// ---- Particle system: stateless bubbles (slides 14-1 #21-23) ----
+const int N_BUBBLES = 12;
+Sphere bubbles[N_BUBBLES];
 
+float hash(float n) { return fract(sin(n) * 43758.5453); }   // repeatable random number per id
+
+// Each bubble is a function of its id and the time: no stored state, no update loop
+Sphere bubbleAt(float id, float time) {
+    float lifespan = 7.0;
+    float clock = time + hash(id) * lifespan;           // random head start (slide 22)
+    float age   = mod(clock, lifespan);                 // wraps back to 0: the bubble is reborn
+    float life  = age / lifespan;                       // 0 = just born, 1 = about to pop
+    float seed  = id + floor(clock / lifespan) * 17.0;  // new random numbers each life
+
+    float radius  = 0.5;
+    vec3 spawn    = vec3(6.0 * (hash(seed + 1.0) - 0.5),
+                         FLOOR_Y - radius - 0.2 - hash(seed + 4.0),   // born under the floor, out of view
+                         -4.0);
+    vec3 velocity = vec3(0.0, 0.8 + 0.4 * hash(seed + 2.0), 0.0);    // straight up
+    float phase   = 6.283 * hash(seed + 3.0);
+    vec3 swirl    = 0.6 * life * vec3(sin(age * 1.5 + phase), 0.0, cos(age * 1.3 + phase));  // slide 23, no wind
+    vec3 bob      = vec3(0.0, 0.15 * sin(time * 0.9 + phase), 0.0);  // the floating motion
+
+    return Sphere(spawn + velocity * age + swirl + bob, radius, vec3(1.0));
+}
+
+void initScene(float time) {
+    randLightSphere = Sphere(u_randLightPos, 0.3, vec3(1.0, 1.0, 0.9));
     float b = time * 0.3;
+    for (int i = 0; i < N_BUBBLES; i++) bubbles[i] = bubbleAt(float(i), time);
+
     cube = Cube(vec3(sin(b) * 2.0, cos(b * 1.5) + 0.5, -9.0 + cos(b * 0.7)), 0.8, vec3(0.3, 0.8, 0.3), 0.85);
 }
 
@@ -160,9 +208,18 @@ bool intersectCube(Ray ray, out float t, out vec3 normal) {
 }
 
 //eta = n1 / n2
-//vec3 refraction(vec3 I, vec3 N, float eta) {
-//    <!-- insert your code here -->
-//}
+// Snell's law. Returns vec3(0) on total internal reflection.
+vec3 refraction(vec3 I, vec3 N, float eta) {
+    float cosI = -dot(I, N);
+    float k = 1.0 - eta * eta * (1.0 - cosI * cosI);
+    if (k < 0.0) return vec3(0.0);
+    return eta * I + (eta * cosI - sqrt(k)) * N;
+}
+
+// vvvv-style Fresnel: bias + scale * (1 - N.V)^exponent
+float fresnel(float cosine, float exponent, float scale, float bias) {
+    return clamp(bias + scale * pow(1.0 - cosine, exponent), 0.0, 1.0);
+}
 
 // Schlick approximation
 //float schlick(float cosine, float ref_idx) {
@@ -186,6 +243,10 @@ HitData traceScene(Ray ray, bool includeLight) {
         hit = HitData(true, t, ray.origin + ray.direction * t, vec3(0.0), lightSphere.color, 0.0, true, false);
     }
 
+    if (includeLight && intersectSphere(ray, randLightSphere, t) && t < hit.t) {
+        hit = HitData(true, t, ray.origin + ray.direction * t, vec3(0.0), randLightSphere.color, 0.0, true, false);
+    }
+
     if (intersectFloor(ray, t) && t < hit.t) {
         vec3 p = ray.origin + ray.direction * t;
         vec2 cell = floor(p.xz / CHECKER_SIZE);
@@ -197,12 +258,61 @@ HitData traceScene(Ray ray, bool includeLight) {
         hit = HitData(true, t, ray.origin + ray.direction * t, n, cube.color, cube.reflectivity, false, false);
     }
 
-    if (intersectSphere(ray, sphere, t) && t < hit.t) {
-        vec3 p = ray.origin + ray.direction * t;
-        hit = HitData(true, t, p, (p - sphere.center) / sphere.radius, sphere.color, 0.0, false, false);
+    // bubbles: skipped for shadow rays (includeLight == false); their ring shadow is handled in trace()
+    if (includeLight) {
+        for (int i = 0; i < N_BUBBLES; i++) {
+            if (intersectSphere(ray, bubbles[i], t) && t < hit.t) {
+                vec3 p = ray.origin + ray.direction * t;
+                hit = HitData(true, t, p, (p - bubbles[i].center) / bubbles[i].radius, bubbles[i].color, 0.0, false, true);
+            }
+        }
     }
 
     return hit;
+}
+
+vec3 sky(vec3 dir) {
+    return mix(vec3(0.09, 0.12, 0.18), vec3(0.18, 0.21, 0.27), 0.5 * (dir.y + 1.0));
+}
+
+// Direct light from ONE light at point p with normal n: shadow ray, bubble ring shadows, diffuse, falloff.
+// Called once per light, and the results are added: that's how multiple lights work.
+vec3 directLight(vec3 p, vec3 n, Sphere light) {
+    vec3 toLight = light.center - p;
+    float lightDist = length(toLight);
+    vec3 lightDir = toLight / lightDist;
+
+    Ray shadowRay = Ray(p + n * 0.001, lightDir);
+    HitData blocker = traceScene(shadowRay, false);
+    float visible = blocker.hit && blocker.t < lightDist ? 0.0 : 1.0;
+
+    // Glass shadow: the shadow ray passes through the glass, losing F at the way in and F at the way out.
+    // F is small through the middle and near 1 at the edge, so the shadow is a dark ring with a lighter center.
+    // Each bubble the shadow ray passes through multiplies in its own share, so overlapping bubble shadows get darker.
+    vec3 glassShadow = vec3(1.0);
+    float tg;
+    for (int i = 0; i < N_BUBBLES; i++) {
+        if (intersectSphere(shadowRay, bubbles[i], tg) && tg < lightDist) {
+            vec3 gn = (shadowRay.origin + lightDir * tg - bubbles[i].center) / bubbles[i].radius;
+            float cosG = abs(dot(lightDir, gn));             // same angle going in and coming out
+            float Fg = fresnel(cosG, u_fresExp, u_fresScale, u_fresBias);
+            vec3 tintG = mix(u_colorCenter, u_colorRim, Fg);
+            glassShadow *= tintG * tintG * (1.0 - Fg) * (1.0 - Fg);   // in and out
+        }
+    }
+
+    float diff = max(dot(n, lightDir), 0.0);
+    float falloff = 1.0 / (1.0 + 0.1 * lightDist * lightDist);
+    return LIGHT_POWER * diff * falloff * visible * glassShadow;
+}
+
+// One-level shade for the reflected part of the glass (no further bounces)
+vec3 shadeOnce(Ray r) {
+    HitData h = traceScene(r, true);
+    if (!h.hit || h.isGlass) return sky(r.direction);
+    if (h.isLight) return h.color * LIGHT_POWER;
+    vec3 light = directLight(h.point, h.normal, lightSphere) + directLight(h.point, h.normal, randLightSphere);
+    return h.color * (light + u_ambientStrength);
 }
 
 vec3 trace(Ray ray) {
@@ -220,42 +330,48 @@ vec3 trace(Ray ray) {
         }
 
         if (hit.isLight) {
-            color += attenuation * lightSphere.color * LIGHT_POWER;
+            color += attenuation * hit.color * LIGHT_POWER;   // whichever light was hit
             break;
         }
 
         // Refraction: (option 1)either reflects or refracts the ray, whichever Schlick says is stronger
         // (option 2): finalColor = hit.color * (F * reflectionColor + (1.0 - F) * refractionColor)
         // (option 3): Monte Carlo Sampling (multiple rays per pixel), reflect with probability F (random() < schlick_value), else refract, and average many samples per pixel
-        //<!-- if (hit.isGlass) {
-        //    <!-- insert your code here -->
+        // Using option 2 (blend), with the vvvv Fresnel instead of Schlick
+        if (hit.isGlass) {
+            vec3 n = hit.normal;
+            float cosI = dot(-ray.direction, n);
+            bool entering = cosI > 0.0;
+            if (!entering) { n = -n; cosI = -cosI; }            // inside the glass: flip normal
+            float eta = entering ? 1.0 / GLASS_IOR : GLASS_IOR;
 
-        //    vec3 direction;
-        //    if (total_internal_reflection || schlick_value > 0.5) {
-                //direction = reflection ray
-        //        <!-- insert your code here -->
-        //    } else {
-                //direction = refraction ray
-        //        <!-- insert your code here -->
-        //    }
+            vec3 refl = reflect(ray.direction, n);
+            vec3 refr = refraction(ray.direction, n, eta);
 
-        //    ray = Ray(hit.point + direction * 0.001, direction);
-        ////Use Schlick approximation to determine contributions from reflection and refraction
-        //    attenuation *= hit.color;
-        //    continue;
-        //}
+            if (refr == vec3(0.0)) {                             // total internal reflection: F = 1 (12-1 #20)
+                attenuation *= u_colorRim;                       // tint at F = 1
+                ray = Ray(hit.point + n * 0.001, refl);
+                continue;
+            }
 
-        vec3 toLight = lightSphere.center - hit.point;
-        float lightDist = length(toLight);
-        vec3 lightDir = toLight / lightDist;
+            // 12-1 #20: when exiting (ηi > ηt), use cos θt in place of cos θi
+            float cosT = sqrt(1.0 - eta * eta * (1.0 - cosI * cosI));   // cos θt (12-1 #16)
+            float F = fresnel(entering ? cosI : cosT, u_fresExp, u_fresScale, u_fresBias);
+            vec3 tint = mix(u_colorCenter, u_colorRim, F);       // lerp between the two colors
 
-        HitData blocker = traceScene(Ray(hit.point + hit.normal * 0.001, lightDir), false);
-        float visible = blocker.hit && blocker.t < lightDist ? 0.0 : 1.0;
-        float diff = max(dot(hit.normal, lightDir), 0.0);
-        float falloff = 1.0 / (1.0 + 0.1 * lightDist * lightDist);
+            // reflected part added now, refracted part keeps going through the loop
+            if (entering) color += attenuation * tint * F * shadeOnce(Ray(hit.point + n * 0.001, refl));
+            attenuation *= tint * (1.0 - F);
+            ray = Ray(hit.point - n * 0.001, refr);
+            continue;
+        }
+
+        // Multiple lights: add up each light's direct light (each with its own shadow ray)
+        vec3 light = directLight(hit.point, hit.normal, lightSphere)
+                   + directLight(hit.point, hit.normal, randLightSphere);
 
         //  (optional) Ambient fill light approximates indirect light we don't trace.
-        vec3 shading = hit.color * (LIGHT_POWER * diff * falloff * visible + u_ambientStrength);
+        vec3 shading = hit.color * (light + u_ambientStrength);
         color += attenuation * shading * (1.0 - hit.reflectivity);
 
         if (hit.reflectivity == 0.0) break;
@@ -278,7 +394,7 @@ void main() {
 
     vec3 target = vec3(0.0, 0.0, -5.0);
     vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution) / u_resolution.y;
-    Ray ray = Ray(target + camera * vec3(0.0, 0.0, 7.0), camera * normalize(vec3(uv, -1.5)));
+    Ray ray = Ray(target + camera * vec3(0.0, 0.0, 9.0), camera * normalize(vec3(uv, -1.5)));
 
     fragColor = vec4(pow(trace(ray), vec3(1.0 / 2.2)), 1.0);  // gamma correction
 }
@@ -335,13 +451,24 @@ void main() {
   gl.enableVertexAttribArray(0);
 
   const bounces = document.getElementById("bounces");
-  const ambient = document.getElementById("ambient");
-  for (const slider of [bounces, ambient]) {
+  // Ambient fill light: a random strength between 0.05 and 0.25, picked once each time the page loads
+  const ambientStrength = 0.05 + Math.random() * 0.20;
+  const fresExp = document.getElementById("fresExp");
+  const fresScale = document.getElementById("fresScale");
+  const fresBias = document.getElementById("fresBias");
+  const colorCenter = document.getElementById("colorCenter");
+  const colorRim = document.getElementById("colorRim");
+  // "#rrggbb" -> linear RGB (the shader gamma-corrects at the end)
+  const hexToLinear = hex => [1, 3, 5].map(i => Math.pow(parseInt(hex.substr(i, 2), 16) / 255, 2.2));
+  for (const slider of [bounces, fresExp, fresScale, fresBias]) {
     slider.addEventListener("input", () => document.getElementById(slider.id + "Value").textContent = slider.value);
   }
 
+  // Second light: a random spot above y = 3, picked once each time the page loads
+  const randLightPos = [Math.random() * 10 - 5, 3.5 + Math.random() * 3, -1 - Math.random() * 8];
+
   // Dragging orbits the camera
-  let pitch = 0, yaw = 0;
+  let pitch = 0.4, yaw = 0;   // start tilted down a little so the glass's shadow is in view
   canvas.addEventListener("pointerdown", e => canvas.setPointerCapture(e.pointerId));
   canvas.addEventListener("pointermove", e => {
     if (!canvas.hasPointerCapture(e.pointerId)) return;
@@ -357,8 +484,14 @@ void main() {
     gl.uniform1f(uniform("u_time"), time / 1000);
     gl.uniform2f(uniform("u_resolution"), canvas.width, canvas.height);
     gl.uniform1i(uniform("u_maxBounces"), bounces.value);
-    gl.uniform1f(uniform("u_ambientStrength"), ambient.value);
+    gl.uniform1f(uniform("u_ambientStrength"), ambientStrength);
     gl.uniform2f(uniform("u_cameraOrbit"), pitch, yaw);
+    gl.uniform1f(uniform("u_fresExp"), fresExp.value);
+    gl.uniform1f(uniform("u_fresScale"), fresScale.value);
+    gl.uniform1f(uniform("u_fresBias"), fresBias.value);
+    gl.uniform3fv(uniform("u_colorCenter"), hexToLinear(colorCenter.value));
+    gl.uniform3fv(uniform("u_colorRim"), hexToLinear(colorRim.value));
+    gl.uniform3fv(uniform("u_randLightPos"), randLightPos);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
   requestAnimationFrame(render);
@@ -366,4 +499,3 @@ void main() {
 </body>
 
 </html>
-
